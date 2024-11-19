@@ -45,7 +45,6 @@ type SSHCmd struct {
 	SetEnvVars          []string
 
 	Stdio                     bool
-	JumpContainer             bool
 	AgentForwarding           bool
 	GPGAgentForwarding        bool
 	GitSSHSignatureForwarding bool
@@ -448,7 +447,7 @@ func (cmd *SSHCmd) startTunnel(ctx context.Context, devPodConfig *config.Config,
 		if cmd.Proxy {
 			go func() {
 				if err := cmd.startRunnerServices(ctx, devPodConfig, containerClient, log); err != nil {
-					log.Error(err)
+					log.Debug(err)
 				}
 			}()
 		}
