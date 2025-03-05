@@ -2,10 +2,8 @@ package devcontainer
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,7 +24,13 @@ const (
 	WorkspaceUIDExtraEnvVar          = "DEVPOD_WORKSPACE_UID"
 	WorkspaceDaemonConfigExtraEnvVar = "DEVPOD_WORKSPACE_DAEMON_CONFIG"
 
-	DefaultEntrypointLoop = "while sleep 1 & wait $!; do :; done"
+	DefaultEntrypoint = `
+while ! command -v /usr/local/bin/devpod >/dev/null 2>&1; do
+  echo "Waiting for devpod tool..."
+  sleep 1
+done
+exec /usr/local/bin/devpod agent container daemon
+`
 )
 
 func (r *runner) runSingleContainer(
@@ -119,48 +123,11 @@ func (r *runner) runSingleContainer(
 		if options.CLIOptions.Platform.AccessKey != "" {
 			r.Log.Debugf("Platform config detected, injecting DevPod daemon entrypoint.")
 
-			// Wait for the devpod binary to be available at /usr/local/bin/devpod,
-			// then execute the daemon as root process.
-			daemonEntrypoint := `
-while ! command -v /usr/local/bin/devpod >/dev/null 2>&1; do
-  echo "Waiting for devpod tool..."
-  sleep 1
-done
-exec /usr/local/bin/devpod agent container daemon`
-
-			mergedConfig.Entrypoints = append(mergedConfig.Entrypoints, daemonEntrypoint)
-
-			var workdir string
-			if r.WorkspaceConfig.Workspace.Source.GitSubPath != "" {
-				substitutionContext.ContainerWorkspaceFolder = filepath.Join(substitutionContext.ContainerWorkspaceFolder, r.WorkspaceConfig.Workspace.Source.GitSubPath)
-				workdir = substitutionContext.ContainerWorkspaceFolder
-			}
-			if workdir == "" && mergedConfig != nil {
-				workdir = mergedConfig.WorkspaceFolder
-			}
-			if workdir == "" && substitutionContext != nil {
-				workdir = substitutionContext.ContainerWorkspaceFolder
-			}
-
-			user := mergedConfig.RemoteUser
-			if mergedConfig.RemoteUser == "" {
-				user = "root"
-			}
-
-			daemonConfig := agent.DaemonConfig{
-				Platform: options.CLIOptions.Platform,
-				Ssh: agent.SshConfig{
-					Workdir: workdir,
-					User:    user,
-				},
-			}
-
-			data, err := json.Marshal(daemonConfig)
+			data, err := agent.GetEncodedDaemonConfig(options.Platform, r.WorkspaceConfig.Workspace, substitutionContext, mergedConfig)
 			if err != nil {
 				r.Log.Errorf("Failed to marshal daemon config: %v", err)
 			} else {
-				encoded := base64.StdEncoding.EncodeToString(data)
-				mergedConfig.ContainerEnv[WorkspaceDaemonConfigExtraEnvVar] = encoded
+				mergedConfig.ContainerEnv[WorkspaceDaemonConfigExtraEnvVar] = data
 			}
 		}
 
@@ -372,21 +339,23 @@ func (r *runner) addExtraEnvVars(env map[string]string) map[string]string {
 }
 
 func GetStartScript(mergedConfig *config.MergedDevContainerConfig) string {
-	customEntrypoints := mergedConfig.Entrypoints
-	if len(customEntrypoints) == 0 {
-		customEntrypoints = append(customEntrypoints, DefaultEntrypointLoop)
+	var sb strings.Builder
+	sb.WriteString("echo Container started\n")
+	sb.WriteString("trap \"exit 0\" 15\n")
+	if len(mergedConfig.Entrypoints) > 0 {
+		sb.WriteString(strings.Join(mergedConfig.Entrypoints, "\n"))
+		sb.WriteString("\n")
 	}
-	return `echo Container started
-trap "exit 0" 15
-exec "$@"
-` + strings.Join(customEntrypoints, "\n")
+	sb.WriteString(DefaultEntrypoint)
+	return sb.String()
 }
 
 func GetContainerEntrypointAndArgs(mergedConfig *config.MergedDevContainerConfig, imageDetails *config.ImageDetails) (string, []string) {
-	cmd := []string{"-c", GetStartScript(mergedConfig), "-"} // `wait $!` allows for the `trap` to run (synchronous `sleep` would not).
+	script := GetStartScript(mergedConfig)
+	cmdArgs := []string{"-c", script}
 	if imageDetails != nil && mergedConfig.OverrideCommand != nil && !*mergedConfig.OverrideCommand {
-		cmd = append(cmd, imageDetails.Config.Entrypoint...)
-		cmd = append(cmd, imageDetails.Config.Cmd...)
+		cmdArgs = append(cmdArgs, imageDetails.Config.Entrypoint...)
+		cmdArgs = append(cmdArgs, imageDetails.Config.Cmd...)
 	}
-	return "/bin/sh", cmd
+	return "/bin/sh", cmdArgs
 }
